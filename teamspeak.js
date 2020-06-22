@@ -1,4 +1,4 @@
-const {TeamSpeak} = require("ts3-nodejs-library");
+const {TeamSpeak, QueryProtocol} = require("ts3-nodejs-library");
 const SteamHandler = require("./steam");
 const URL = require("url");
 const database = require("./database");
@@ -105,39 +105,42 @@ class Teamspeak {
         //We first need to get the TeamspeakClient
         let tsClientList = await this.ts3.clientList({client_type: 0, client_unique_identifier: tsUid});
 
-
-        //Check if tsClientList contains at least one client
-        if(tsClientList.length > 0)
-        {
-            let tsClient = tsClientList[0];
-            let newCsgoRankSgid = Teamspeak.getRankGroupFromRankId(csgoRankId);
-
-            //Remove the user from all previous ranks
-            let clientInfo = await tsClient.getInfo();
-            let clientGroups = clientInfo.client_servergroups;
-            let serverRankSgids = [];
-
-            //Load all sgids from config into array
-            for(let value of Object.values(config.tsRankSgids))
+        try {
+            //Check if tsClientList contains at least one client
+            if(tsClientList.length > 0)
             {
-                serverRankSgids.push(value);
+                let tsClient = tsClientList[0];
+                let newCsgoRankSgid = Teamspeak.getRankGroupFromRankId(csgoRankId);
+
+                //Remove the user from all previous ranks
+                let clientInfo = await tsClient.getInfo();
+                let clientGroups = clientInfo.client_servergroups;
+                let serverRankSgids = [];
+
+                //Load all sgids from config into array
+                for(let value of Object.values(config.tsRankSgids))
+                {
+                    serverRankSgids.push(value);
+                }
+
+                // Filter the list of ranks which are included in the server configuration and are assigned to the client
+                // This will give us a list of ranks we have to remove
+                let sgidIntersection = clientGroups.filter(x => serverRankSgids.includes(x));
+                if (sgidIntersection.length > 0) {
+                    await tsClient.delGroups(sgidIntersection);
+                }
+
+                // Assign the new rank to the client
+                await tsClient.addGroups(newCsgoRankSgid);
+                // await tsClient.addGroups(10);
+
+                logger.debug(`Updated skill group of user ${tsClient.nickname}`);
+            } else {
+                logger.debug(`No clients!`);
             }
-
-            // Filter the list of ranks which are included in the server configuration and are assigned to the client
-            // This will give us a list of ranks we have to remove
-            let sgidIntersection = clientGroups.filter(x => serverRankSgids.includes(x));
-
-            // Iterate through sgidIntersection and remove each group from the server client
-            for(let i = 0; i < sgidIntersection.length; i++)
-            {
-                await tsClient.delGroups(sgidIntersection[i].toString());
-            }
-
-            // Assign the new rank to the client
-            await tsClient.addGroups(newCsgoRankSgid);
-            //await tsClient.addGroups(6);
-
-            logger.debug(`Updated skill group of user ${tsClient.nickname}`);
+        } catch (error) {
+            logger.debug(`Error when updating skill group of user`);
+            console.error(error);
         }
     }
 
@@ -146,7 +149,7 @@ class Teamspeak {
 
     static async onMessageReceived(ev) {
         //The Targetmode (1 = Client, 2 = Channel, 3 = Virtual Server)
-        if (ev.targetmode !== 1 || ev.invoker.isQuery() === true) {
+        if (ev.invoker.isQuery() === true) {
             //Nachricht wird verworfen, wenn sie nicht direkt an den Bot geht
             return null;
         }
@@ -297,23 +300,23 @@ class Teamspeak {
 
         //Create a new Connection
         this.ts3 = new TeamSpeak({
-            protocol: (config.tsConfig.ssh) ? 'ssh' : 'raw',
+            protocol: (config.tsConfig.ssh) ? QueryProtocol.SSH : QueryProtocol.RAW,
             host: config.tsConfig.host,
             queryport: config.tsConfig.queryport,
             serverport: config.tsConfig.serverport,
             username: config.tsConfig.username,
             password: config.tsConfig.password,
             nickname: config.tsConfig.nickname,
-            keepalive: true
+            keepAlive: true
         });
 
 
         //The clientconnect event gets fired when a new Client joins the TeamSpeak Server
-        this.ts3.on("clientconnect", ev => {
-            let client = ev.client;
-            logger.debug(`Client ${client.nickname} just connected`);
-            client.message(config.botConfig.greetingMessage);
-        });
+        // this.ts3.on("clientconnect", ev => {
+        //     let client = ev.client;
+        //     logger.debug(`Client ${client.nickname} just connected`);
+        //     client.message(config.botConfig.greetingMessage);
+        // });
 
 
         //What to do, when Bot has finished connecting
@@ -321,6 +324,7 @@ class Teamspeak {
             Promise.all([
                 this.ts3.registerEvent("server"),
                 this.ts3.registerEvent("channel", config.tsConfig.ts_welcomechannel_id),
+                this.ts3.registerEvent("textchannel"),
                 this.ts3.registerEvent("textprivate")
             ]).then(() => {
                 logger.info("Teamspeak interface connected and ready!");
@@ -363,6 +367,8 @@ class Teamspeak {
      * Updates the rank of all registered players currently online
      */
     async updateTick() {
+        logger.debug("Execute update tick");
+
         //get all clients online
         let onlineClients = await this.ts3.clientList({client_type: 0});
 

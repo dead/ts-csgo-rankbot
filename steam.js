@@ -8,6 +8,7 @@ const config = require('./config/config');
 const database = require("./database");
 const BroadcastChannel = require('broadcast-channel');
 const exchangeChannel = new BroadcastChannel('exchange');
+const crypto = require("crypto");
 
 module.exports.steamProfileUrl = null;
 
@@ -24,6 +25,7 @@ class Steam {
         this.SteamGC = new steamApi.SteamGameCoordinator(this.SteamClient, 730);
         this.SteamFriends = new steamApi.SteamFriends(this.SteamClient);
         this.CSGOCli = new csgo.CSGOClient(this.SteamUser, this.SteamGC, true);
+        this.requesting = null;
     }
 
 
@@ -34,11 +36,17 @@ class Steam {
      * @return rank id if set; else null
      */
     async getCSGORankOfSteam64id(steam64id){
-        return new Promise((resolve => {
+        if (this.requesting) {
+            logger.debug(`Waiting to request steam CSGO rank ${steam64id}`);
+            await this.requesting;
+            logger.debug("DONE");
+        }
+
+        this.requesting = new Promise((resolve => {
             logger.debug(`Getting player Profile of steam64id ${steam64id}`);
 
             //Register event listener for one time use
-            this.CSGOCli.once('playerProfile', async (profile) => {
+            this.CSGOCli.once('playerProfile', (profile) => {
                 let ranking = profile.account_profiles[0].ranking;
 
                 //We need to check if ranking is set; if not, the user has not added us to their friend list
@@ -53,8 +61,12 @@ class Steam {
                 }
             });
 
+            // setTimeout(() => resolve(null), 2000);
+
             this.CSGOCli.playerProfileRequest(this.CSGOCli.ToAccountID(steam64id));
         }));
+
+        return this.requesting;
     }
 
 
@@ -200,7 +212,7 @@ class Steam {
         {
             try
             {
-                fs.writeFile('./config/.steamservers', JSON.stringify(servers));
+                fs.writeFileSync('./config/.steamservers', JSON.stringify(servers));
                 logger.info("Updated .steamservers file!");
             }
             catch (e) {
@@ -210,13 +222,52 @@ class Steam {
 
             steamApi.servers = servers;
         });
-
-
-
+        
         //Steam Connected Event
         this.SteamClient.on('connected', function ()
         {
-            _self.SteamUser.logOn(config.steamConfig);
+            //check if file exists
+            fs.stat("./config/.steamauth", err => {
+                const loginConf = {
+                    account_name: config.steamConfig.account_name,
+                    password: config.steamConfig.password
+                }
+                if (err) {
+                    //log error but try to continue with authentication anyway
+                    logger.warn("Could not read stat from .steamauth file, this error is non fatal")
+                    logger.warn(err.message)
+                    if (config.steamConfig.auth_code.length > 0)
+                    loginConf.auth_code = config.steamConfig.auth_code
+                    _self.SteamUser.logOn(loginConf);
+                } else {
+                    logger.debug("using .steamauth file")
+                    //continue with sentry file
+                    fs.readFile("./config/.steamauth", "binary", (err, res) => {
+                        if (err) {
+                            logger.error("Could not read steam auth file!")
+                            logger.error(err)
+                            return process.exit(1)
+                        }
+                        loginConf.sha_sentryfile = crypto.createHash('sha1').update(Buffer.from(res, "binary")).digest()
+                        _self.SteamUser.logOn(loginConf)
+                    })
+                }
+            })
+        });
+
+        //update sentryfile for 2fa
+        this.SteamUser.on("updateMachineAuth", (result, callback) => {
+            if (!result || !result.bytes) {
+                logger.warn("received invalid updateMachineAuth response!")
+                logger.warn("dont post the below data publicly!!!")
+                return logger.warn(result)
+            }
+            callback({ sha_file: crypto.createHash('sha1').update(result.bytes).digest() })
+            fs.writeFile("./config/.steamauth", result.bytes, "binary", err => {
+                if (!err) return logger.info("wrote new .steamauth file!")
+                logger.warn("Could not write machine authentication code to ./config/.steamauth!")
+                logger.warn(err)
+            })
         });
 
 
