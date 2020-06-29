@@ -25,7 +25,7 @@ class Steam {
         this.SteamGC = new steamApi.SteamGameCoordinator(this.SteamClient, 730);
         this.SteamFriends = new steamApi.SteamFriends(this.SteamClient);
         this.CSGOCli = new csgo.CSGOClient(this.SteamUser, this.SteamGC, true);
-        this.requesting = null;
+        this.profilesRequests = {};
     }
 
 
@@ -36,37 +36,26 @@ class Steam {
      * @return rank id if set; else null
      */
     async getCSGORankOfSteam64id(steam64id){
-        if (this.requesting) {
-            logger.debug(`Waiting to request steam CSGO rank ${steam64id}`);
-            await this.requesting;
-            logger.debug("DONE");
-        }
+        logger.debug(`Getting player Profile of steam64id ${steam64id}`);
 
-        this.requesting = new Promise((resolve => {
-            logger.debug(`Getting player Profile of steam64id ${steam64id}`);
+        return new Promise((resolve => {
+            const accountId = this.CSGOCli.ToAccountID(steam64id);
 
-            //Register event listener for one time use
-            this.CSGOCli.once('playerProfile', (profile) => {
-                let ranking = profile.account_profiles[0].ranking;
-
-                //We need to check if ranking is set; if not, the user has not added us to their friend list
-                if(ranking !== null)
-                {
-                    logger.debug(`Got rank ${ranking.rank_id} for steam64id ${steam64id}`);
-                    resolve(ranking.rank_id);
-                }
-                else
-                {
+            if (!(accountId in this.profilesRequests)) {
+                this.profilesRequests[accountId] = [];
+            }
+            
+            this.profilesRequests[accountId].push((account) => {
+                if (account.ranking) {
+                    logger.debug(`Got rank ${account.ranking.rank_id} for steam64id ${steam64id}`);
+                    resolve(account.ranking.rank_id);
+                } else {
                     resolve(null);
                 }
             });
 
-            // setTimeout(() => resolve(null), 2000);
-
-            this.CSGOCli.playerProfileRequest(this.CSGOCli.ToAccountID(steam64id));
+            this.CSGOCli.playerProfileRequest(accountId);
         }));
-
-        return this.requesting;
     }
 
 
@@ -307,6 +296,18 @@ class Steam {
             _self.CSGOCli.on('ready', () =>
             {
                 logger.info("CSGO interface ready!");
+            });
+
+            _self.CSGOCli.on('playerProfile', (profiles) => {
+                const account = profiles.account_profiles[0];
+                if (_self.profilesRequests[account.account_id]) {
+                    while (_self.profilesRequests[account.account_id].length > 0) {
+                        const updateRank = _self.profilesRequests[account.account_id].pop();
+                        updateRank(account);
+                    }
+                    
+                    delete _self.profilesRequests[account.account_id];
+                }
             });
         });
 
